@@ -1,0 +1,3 @@
+PLAYER: scripts/OSSC/ossc_settings.lua
+PLAYER: scripts/OSSC/ossc_player.lua
+GLOBAL: scripts/OSSC/ossc_global.lua
