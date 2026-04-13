@@ -1,4 +1,4 @@
-# Oblivion-Style Spell Casting (OSSC) v1.1
+# Oblivion-Style Spell Casting (OSSC) v1.2
 
 **Oblivion-Style Spell Casting** (OSSC) brings modern spellcasting mechanics to OpenMW. It allows you to cast your currently selected spell or power using a dedicated hotkey without needing to switch to spell stance, just like in TES IV: Oblivion.
 
@@ -31,5 +31,5 @@ OSSC is designed to be lightweight. It handles the player's input and animation 
 
 ## 5. Credits
 - **Mod Author:** skrow42 / Antigravity
-- **Animations:** BIG thanks to MaxYari and dubiousnpc for providing the animations for casting
+- **Animations:** BIG thanks to MaxYari and dubiousnpc for providing the animations for casting. Also Fallchildren for his VFX Bone file for the spell effects on hands
 - **Physics Engine:** Thanks to MaxYari again for his great physics engine

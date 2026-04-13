@@ -11,6 +11,7 @@ local ambient = require('openmw.ambient')
 local storage = require('openmw.storage')
 local I       = require('openmw.interfaces')
 local debug   = require('openmw.debug')
+local nearby  = require('openmw.nearby')
 
 local function debugLog(msg)
     local debugOn = storage.playerSection('SettingsOSSC_General'):get('DebugMode')
@@ -19,10 +20,20 @@ local function debugLog(msg)
     end
 end
 
-
-
-
-
+-- some spell vfx --
+local function get_spell_or_enchanted_item()
+    local spell_or_item = types.Actor.getSelectedSpell(omwself);
+    if not spell_or_item then
+        local item = types.Actor.getSelectedEnchantedItem(omwself)
+        if item and item.type then
+            local rec = item.type.record(item)
+            if rec and rec.enchant then
+                spell_or_item = core.magic.enchantments.records[rec.enchant]
+            end
+        end
+    end
+    return spell_or_item
+end
 
 local isCasting    = false
 local hasQueuedLaunch = false
@@ -118,10 +129,6 @@ local function getCastChance(spell, caster)
     local cost         = spell.cost or 0
     local fatigue      = types.Actor.stats.dynamic.fatigue(caster)
     local fatigueRatio = 1
-    if action == "QuickCast" and value then
-        if ui.getMode() ~= nil then return end
-        triggerQuickCast()
-    end
     if fatigue.base > 0 then
         fatigueRatio = fatigue.current / fatigue.base
     end
@@ -130,6 +137,62 @@ local function getCastChance(spell, caster)
     if chance < 0   then chance = 0   end
     if chance > 100 then chance = 100 end
     return chance
+end
+
+local spellvfx = false
+
+local function add_spell_vfx_one(left)
+    local spell = currentSpell
+    if not spell or not spell.effects or not spell.effects[1] then return end
+    local mgef = core.magic.effects.records[spell.effects[1].id]
+    if not mgef then return end
+
+    local texture = "vfx_starglow.tga"
+    if mgef.particle and mgef.particle ~= "" then
+        texture = mgef.particle
+    end
+
+    if texture:find("blank") then
+        texture = "vfx_starglow.tga"
+    end
+    local model = "meshes/magichand/spellvfx.nif"
+
+    local bone = "Bip01 R Hand"
+    local vfx_id = "OSSC_SpellVFXRight"
+
+    if left then
+        bone = "Bip01 L Hand"
+        vfx_id = "OSSC_SpellVFXLeft"
+    end
+
+    anim.addVfx(
+        self,
+        model,
+        {
+            boneName=bone,
+            loop=true,
+            vfxId=vfx_id,
+            particleTextureOverride=texture
+        }
+    )
+end
+
+local function add_spell_vfx()
+    print("OSSC: Camera mode: " .. (camera and camera.getMode() or "nil"))
+    -- Removed first person check to allow VFX in first person
+    print("OSSC: Adding spell VFX")
+    add_spell_vfx_one(true)
+    add_spell_vfx_one(false)
+    spellvfx = true
+end
+
+local function remove_spell_vfx()
+    if spellvfx then
+        print("OSSC: Removing spell VFX")
+        anim.removeVfx(self, "OSSC_SpellVFXRight")
+        anim.removeVfx(self, "OSSC_SpellVFXLeft")
+        spellvfx = false
+    end
 end
 
 local function onUpdate(dt)
@@ -205,70 +268,116 @@ local function onUpdate(dt)
                                 direction   = util.vector3(xzLen * math.sin(yaw), xzLen * math.cos(yaw), math.sin(pitch))
                                 local forwardDir = util.vector3(direction.x, direction.y, 0):normalize()
                                 local rightDir   = util.vector3(forwardDir.y, -forwardDir.x, 0)
-                                startPos    = camera.getPosition() - util.vector3(0, 0, 10) - (rightDir * 45)
+                                -- Back to Left Hand (-) and keeping forward depth
+                                startPos    = camera.getPosition() + (forwardDir * 20) - util.vector3(0, 0, 10) - (rightDir * 45)
                             else
-                                -- Default to Third Person logic for all other modes (Vanity, Preview, etc.)
+                                -- Default to Third Person logic
                                 local bodyDir    = self.rotation * util.vector3(0, 1, 0)
                                 local bodyYaw    = math.atan2(bodyDir.x, bodyDir.y)
                                 local xzLen      = math.cos(pitch)
                                 direction        = util.vector3(xzLen * math.sin(bodyYaw), xzLen * math.cos(bodyYaw), math.sin(pitch))
                                 local forwardDir = util.vector3(direction.x, direction.y, 0):normalize()
                                 local rightDir   = util.vector3(forwardDir.y, -forwardDir.x, 0)
-                                startPos         = self.position + util.vector3(0, 0, 110) + (forwardDir * 5) - (rightDir * 30)
+                                -- Back to Left Hand (-)
+                                startPos         = self.position + (forwardDir * 20) + util.vector3(0, 0, 110) - (rightDir * 30)
                             end
 
-                            local range = (spell.effects and spell.effects[1]) and spell.effects[1].range or core.magic.RANGE.Target
-                            local hitObject = nil
+                            -- [PRECISION AIMING] Custom Engine Raycast (10000 units)
+                            local cameraPos = camera.getPosition()
                             
-                            -- [PRECISION TOUCH] Use SharedRay for pixel-perfect aiming on Touch spells
-                            if range == core.magic.RANGE.Touch then
-                                local ray = I.SharedRay and I.SharedRay.get()
-                                if ray and ray.hit and ray.hitObject then
-                                    local dist = (ray.hitObject.position - self.position):length()
-                                    if dist < 250 then
-                                        hitObject = ray.hitObject
-                                        debugLog("SharedRay Found Touch Target: " .. tostring(hitObject.recordId))
-                                    end
+                            -- Calculate camera vector manually since getViewDirection() is nil
+                            local cp = -camera.getPitch()
+                            local cy = camera.getYaw()
+                            local cameraDir = util.vector3(math.cos(cp) * math.sin(cy), math.cos(cp) * math.cos(cy), math.sin(cp))
+                            local endPos    = cameraPos + (cameraDir * 10000)
+                            local ray       = nearby.castRay(cameraPos, endPos, { ignore = self })
+                            
+                            local aimPoint   = ray.hit and ray.hitPos or endPos
+                            local hitObject  = ray.hit and ray.hitObject or nil
+
+                            -- [CENTER-MASS MAGNETISM] If target is point-blank, aim for the heart, not the impact pixel
+                            local distanceToTarget = (aimPoint - cameraPos):length()
+                            if hitObject and distanceToTarget < 250 then
+                                if hitObject.type == types.NPC or hitObject.type == types.Creature or hitObject.type == types.Player then
+                                    local zOffset = 95
+                                    pcall(function()
+                                        local bbox = hitObject:getBoundingBox()
+                                        if bbox and bbox.min and bbox.max then
+                                            zOffset = (bbox.max.z - bbox.min.z) * 0.5
+                                        end
+                                    end)
+                                    aimPoint = hitObject.position + util.vector3(0, 0, zOffset)
                                 end
+                            end
+
+                            local skewedDirection = (aimPoint - startPos):normalize()
+
+                            -- [RANGE RESOLUTION]
+                            local range = core.magic.RANGE.Target
+                            local spellRec = core.magic.spells.records[spell.id] or spell.enchantment
+                            if spellRec and spellRec.effects and spellRec.effects[1] then
+                                range = spellRec.effects[1].range
+                            end
+
+                            -- [TOUCH CHECK] Verify distance for melee magic
+                            if range == core.magic.RANGE.Touch then
+                                if hitObject then
+                                    if distanceToTarget > 300 then 
+                                        debugLog("Touch Target Too Far: " .. tostring(distanceToTarget))
+                                        hitObject = nil 
+                                    end
+                                else
+                                    debugLog("OSSC: No valid Touch target found in ray.")
+                                end
+                            end
+
+                            -- [DYNAMIC SPAWN BUFFER] 
+                            -- Prevent spawning "inside" actors at point-blank range
+                            local spawnOffset = 80 
+                            if hitObject and distanceToTarget < 200 then
+                                spawnOffset = 10 -- Start at hand to ensure we don't skip the front surface
                             end
 
                             core.sendGlobalEvent('MagExp_CastRequest', {
                                 attacker      = self,
                                 spellId       = spell.id,
                                 startPos      = startPos,
-                                direction     = direction,
+                                direction     = skewedDirection,
                                 area          = spell.area,
                                 isFree        = true,
-                                vfxRecId      = spell.vfxRecId,
-                                itemRecordId  = (spell.item and spell.item.recordId) or spell.id,
-                                hitObject     = hitObject -- PRIORITY TARGET
+                                item          = spell.item, 
+                                hitObject     = hitObject,
+                                spawnOffset   = spawnOffset
                             })
 
-                            -- Autoritative Item Consumption
+                            -- Authoritative Item Consumption
                             if isItem then
                                 if spell.enchantment and spell.enchantment.type == 0 then
                                     core.sendGlobalEvent('OSSC_ConsumeScroll', { actor = self, item = spell.item })
                                 elseif spell.enchantment and spell.enchantment.type == 2 then
-                                    local baseCostToSend = tonumber(spell.cost) or 0
-                                    debugLog(string.format("Requesting Charge Deduction: %s Base=%d", tostring(spell.item.recordId), baseCostToSend))
                                     core.sendGlobalEvent('OSSC_ConsumeCharge', { 
                                         actor = self, 
                                         item  = spell.item, 
-                                        cost  = baseCostToSend 
+                                        cost  = tonumber(spell.cost) or 0 
                                     })
                                 end
-                           end
+                            end
 
-                            -- [SKILL PROGRESS] Reward XP for successful cast
+                            -- [SKILL PROGRESS] 
                             local xpGain = storage.playerSection('SettingsOSSC_General'):get('SkillExperience')
                             if isItem then
-                                -- Enchanted items grant Enchanting experience
-                                I.SkillProgression.skillUsed('enchant', { skillGain = xpGain })
+                                I.SkillProgression.skillUsed('enchant', { 
+                                    skillGain = xpGain,
+                                    useType   = 1 -- EnchantUse
+                                })
                             elseif spell.effects and spell.effects[1] then
                                 -- Normal spells grant School-specific experience
                                 local mgef = core.magic.effects.records[spell.effects[1].id]
                                 if mgef and mgef.school then
-                                    I.SkillProgression.skillUsed(mgef.school, { skillGain = xpGain })
+                                    I.SkillProgression.skillUsed(mgef.school, { 
+                                        skillGain = xpGain,
+                                        useType   = 0 -- SpellCast
+                                    })
                                 end
                             end
                         else
@@ -298,7 +407,7 @@ local function onTextKey(groupname, key)
     debugLog("Text Key Fired -> group=" .. tostring(groupname) .. "  key=" .. tostring(key))
 
     -- [START] Wind-up sound
-    if string.find(lowerKey, 'start') then
+    if string.find(lowerKey, 'start') or lowerKey == 'equip start' then
         if hasQueuedLaunch then return end
         hasQueuedLaunch = true
         
@@ -325,46 +434,47 @@ local function onTextKey(groupname, key)
                     sndId = mgef.castSound
                 end
                 
+                -- [CASTING VISUALS] Hand Glows
+                pcall(function()
+                    if mgef.castStatic then
+                        local static = types.Static.records[mgef.castStatic]
+                        if static and static.model then
+                            anim.addVfx(self, static.model, { loop = true, vfxId = "OSSC_HandGlow" })
+                        end
+                    end
+                end)
+                
                 debugLog("Windup Sound evaluating to: " .. tostring(sndId))
                 pcall(function() core.sound.playSound3d(sndId, self, { volume = 1.0 }) end)
                 
-                local spellRec = core.magic.spells.records[spell.id] or core.magic.enchantments.records[spell.id]
-                if spellRec and spellRec.effects and spellRec.effects[1] then
-                    local r = spellRec.effects[1].range
-                    if r == core.magic.RANGE.Self or r == core.magic.RANGE.Touch then
-                        core.sendGlobalEvent('MagExp_HitEvent', {
-                            attacker  = self,
-                            target    = self,
-                            spellId   = spell.id,
-                            hitPos    = self.position,
-                            spellType = r,
-                            isAoE     = false,
-                            area      = spellRec.effects[1].area or 0
-                        })
-                    end
-                end
-                
-                local delay = 0.62 -- targetted spells casting/inflicting timer
+                -- Queue the spell application for the appropriate delay
+                local delay = 0.62 
                 if spell.effects and spell.effects[1] then
                     local r = spell.effects[1].range
                     if r == core.magic.RANGE.Self then
-                        delay = 1.00 -- self spells casting/inflicting timer
+                        delay = 1.00 
                     elseif r == core.magic.RANGE.Touch then
-                        delay = 0.62 -- touch spells casting/inflicting timer
+                        delay = 0.62
                     end
                 end
 
-                -- [GLOBAL EXECUTION] Delayed casting based on spell range
-                debugLog("Queueing Launch for " .. tostring(spell.id) .. " with cost: " .. tostring(spell.cost or 0))
+                debugLog("Queueing Launch for " .. tostring(spell.id))
                 table.insert(pendingLaunches, {
                     spell      = spell,
                     timeToFire = core.getSimulationTime() + delay
                 })
-
             end
+            add_spell_vfx()
         end
 
+    -- [RELEASE] Launch spell
+    elseif string.find(lowerKey, 'release') or string.find(lowerKey, 'shoot release') then
+        anim.removeVfx(self, "OSSC_HandGlow")
+        -- Logic handled by pendingLaunches queue
+
     elseif string.find(lowerKey, 'stop') then
+        anim.removeVfx(self, "OSSC_HandGlow")
+        remove_spell_vfx()
         isCasting = false
         if I.Controls then I.Controls.overrideCombatControls(false) end
     end
@@ -375,7 +485,7 @@ input.registerActionHandler('OSSC_QuickCast', async:callback(function(pressed)
     local uiMode = (ui and ui.activeMode)
     if not uiMode and I.UI and I.UI.getMode then uiMode = I.UI.getMode() end
     
-    if not pressed or uiMode ~= nil then return end
+    if not pressed or uiMode ~= nil or core.isWorldPaused() then return end
     if isCasting then return end
 
     debugLog("Quick Cast Action Triggered")
@@ -533,6 +643,7 @@ input.registerActionHandler('OSSC_QuickCast', async:callback(function(pressed)
                 startkey = 'start',
                 stopkey  = 'stop',
                 speed    = 1.5,
+                blendMask = 14
             })
         else
             I.AnimationController.playBlendedAnimation(animGroup, {
@@ -540,6 +651,7 @@ input.registerActionHandler('OSSC_QuickCast', async:callback(function(pressed)
                 startkey = 'start',
                 stopkey  = 'stop',
                 speed    = 0.65,
+                blendMask = 14
             })
             anim.setSpeed(self, animGroup, 0.55)
             async:newUnsavableSimulationTimer(0.65, function()
@@ -579,5 +691,15 @@ return {
         onUpdate      = onUpdate,
         onSave        = onSave,
         onLoad        = onLoad,
+    },
+    eventHandlers = {
+        AddVfx      = function(data) pcall(function() anim.addVfx(self, data.model, data.options) end) end,
+        RemoveVfx   = function(vId)  pcall(function() anim.removeVfx(self, vId) end) end,
+        PlaySound3d = function(data) pcall(function() core.sound.playSound3d(data.sound, self) end) end,
+        
+        -- Authoritative Hit Dispatch (Regressed previously)
+        MagExp_Local_MagicHit = function(data)
+            -- Local logic for impact particles can go here
+        end
     }
 }

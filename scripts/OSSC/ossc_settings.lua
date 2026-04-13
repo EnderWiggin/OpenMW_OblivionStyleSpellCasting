@@ -14,7 +14,7 @@ if I.Settings and I.Settings.registerPage then
     I.Settings.registerPage({
         key = 'OSSCPage',
         l10n = 'OSSC',
-        name = 'Oblivion-Style Spell Casting v1.1',
+        name = 'Oblivion-Style Spell Casting v1.2',
         description = 'Settings for the OSSC Mod'
     })
 
