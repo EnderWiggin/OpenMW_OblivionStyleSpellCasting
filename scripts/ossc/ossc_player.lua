@@ -378,11 +378,12 @@ local function triggerQuickCast(opts)
     -- ── Resolve spell / enchanted item ────────────────────────────────────
     local activeSpell = nil
     local selectedItem = opts and opts.item
+    local activeSpellResult = opts and opts.spell
 
     if not selectedItem or not selectedItem:isValid() then
         pcall(function() selectedItem = types.Actor.getSelectedEnchantedItem(self) end)
     end
-    if selectedItem and selectedItem:isValid() then
+    if selectedItem and selectedItem:isValid() and not activeSpellResult then
         local rec = nil
         pcall(function()
             if selectedItem.type == types.Weapon   then rec = types.Weapon.record(selectedItem)
@@ -403,7 +404,6 @@ local function triggerQuickCast(opts)
         end
     end
 
-    local activeSpellResult = opts and opts.spell
     if not activeSpell then
         if not activeSpellResult then
             pcall(function() activeSpellResult = core.magic.getSelectedSpell() end)
