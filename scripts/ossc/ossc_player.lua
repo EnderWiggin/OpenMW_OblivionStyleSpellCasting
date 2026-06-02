@@ -283,6 +283,7 @@ local function animUnlock(reason)
     isCasting        = false
     currentAnimGroup = nil
     disableCombatBlock()
+    self:sendEvent('OSSC_CastingState', { isCasting = isCasting })
 end
 
 local function fullCleanup(reason)
@@ -350,10 +351,11 @@ end
 -- ── END NEW ────────────────────────────────────────────────────────────────
 
 -- ── Shared cast startup function ──────────────────────────────────────────
-local function triggerQuickCast()
+local function triggerQuickCast(opts)
+    local ignoreUIMode = opts and opts.ignoreUIMode
     local uiMode = (ui and ui.activeMode)
     if not uiMode and I.UI and I.UI.getMode then uiMode = I.UI.getMode() end
-    if uiMode ~= nil or core.isWorldPaused() or isCasting then
+    if (uiMode ~= nil and not ignoreUIMode) or core.isWorldPaused() or isCasting then
         if isCasting then
             debugLog("Input rejected — cast in progress (currentAnimGroup=" ..
                 tostring(currentAnimGroup) .. ")")
@@ -375,8 +377,11 @@ local function triggerQuickCast()
 
     -- ── Resolve spell / enchanted item ────────────────────────────────────
     local activeSpell = nil
-    local selectedItem = nil
-    pcall(function() selectedItem = types.Actor.getSelectedEnchantedItem(self) end)
+    local selectedItem = opts and opts.item
+
+    if not selectedItem or not selectedItem:isValid() then
+        pcall(function() selectedItem = types.Actor.getSelectedEnchantedItem(self) end)
+    end
     if selectedItem and selectedItem:isValid() then
         local rec = nil
         pcall(function()
@@ -398,9 +403,11 @@ local function triggerQuickCast()
         end
     end
 
-    local activeSpellResult = nil
+    local activeSpellResult = opts and opts.spell
     if not activeSpell then
-        pcall(function() activeSpellResult = core.magic.getSelectedSpell() end)
+        if not activeSpellResult then
+            pcall(function() activeSpellResult = core.magic.getSelectedSpell() end)
+        end
         if not activeSpellResult then
             pcall(function() activeSpellResult = types.Actor.getSelectedSpell(self) end)
         end
@@ -533,6 +540,7 @@ local function triggerQuickCast()
     currentCastId = currentCastId + 1
     castStartTime = now
     enableCombatBlock()
+    self:sendEvent('OSSC_CastingState', { isCasting = isCasting })
 
     local safetyUnlockCastId = currentCastId
     async:newUnsavableSimulationTimer(scaledSafetyUnlockDelay, function()
@@ -1002,9 +1010,48 @@ local function onLoad(data)
     if data and data.powerCooldowns then OSSC_PowerCooldowns = data.powerCooldowns end
 end
 
+--- item and spell in these opts are ids, because we can't serialize full game objects to pass to events
+local function OSSC_QuickCast_Handler(opts)
+    if not opts then
+        triggerQuickCast()
+        return
+    end
+
+    --get item by id
+    if opts.item then
+        local _, item = pcall(function()
+            local id = opts.item
+            if not id then return nil end
+
+            local items = self.type.inventory(self):getAll()
+            for _, item in ipairs(items) do
+                if item.id == id then return item end
+            end
+            return nil
+        end)
+        if item and item:isValid() then
+            opts.item = item
+        end
+        --get spell by id
+    elseif opts.spell then
+        local _, spell = pcall(function() return core.magic.spells.records[opts.spell] end)
+        if spell then
+            opts.spell = spell
+        end
+    end
+
+    triggerQuickCast(opts)
+end
+
 return {
     engineHandlers = { onUpdate=onUpdate, onSave=onSave, onLoad=onLoad },
+    interfaceName = 'OSSC',
+    interface = {
+        triggerQuickCast = triggerQuickCast,
+        isCasting = function() return isCasting end
+    },
     eventHandlers  = {
+        OSSC_QuickCast = OSSC_QuickCast_Handler,
         AddVfx      = function(data) pcall(function() anim.addVfx(self, data.model, data.options) end) end,
         RemoveVfx   = function(vId)  pcall(function() anim.removeVfx(self, vId) end) end,
         PlaySound3d = function(data) pcall(function() core.sound.playSound3d(data.sound, self) end) end,
