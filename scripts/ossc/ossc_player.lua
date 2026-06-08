@@ -137,43 +137,11 @@ end
 
 local function getCastChance(spell, caster)
     if spell.item then return 100 end
-    local spellRec = core.magic.spells.records[spell.id]
-    if spellRec and spellRec.type == core.magic.SPELL_TYPE.Power then return 100 end
-    if not spell.effects or #spell.effects == 0 then return 100 end
-    local function getEffectMagnitude(effectId)
-        local magnitude = 0
-        pcall(function()
-            local activeEffects = types.Actor.activeEffects(caster)
-            if activeEffects then
-                local eff = activeEffects:getEffect(effectId)
-                if eff and eff.magnitude then magnitude = eff.magnitude end
-            end
-        end)
-        return magnitude
-    end
-    if getEffectMagnitude("silence") > 0 then return 0 end
-    local magicEffectRecord = core.magic.effects.records[spell.effects[1].id]
-    local schoolId = magicEffectRecord and magicEffectRecord.school
-    local skillVal = 0
-    if schoolId and types.NPC.stats.skills[schoolId] then
-        local sk = types.NPC.stats.skills[schoolId]
-        if sk then skillVal = sk(caster).modified end
-    end
-    local willpower = types.Actor.stats.attributes.willpower(caster).modified
-    local luck      = types.Actor.stats.attributes.luck(caster).modified
-    local cost      = spell.cost or 0
-    local soundLevel = getEffectMagnitude("sound")
-    local fatigue   = types.Actor.stats.dynamic.fatigue(caster)
-    local fatigueTerm = 1.0
     local sec = storage.playerSection('SettingsOSSC_General')
-    if sec and sec:get('UseFatigue') and fatigue.base > 0 then
-        fatigueTerm = 0.75 + 0.5*(fatigue.current/fatigue.base)
-    end
-    local baseChance = (skillVal*2)+(willpower/5)+(luck/10)-cost
-    local chance = (baseChance-soundLevel)*fatigueTerm
-    chance = math.max(0, math.min(100, math.floor(chance+0.5)))
-    local chanceScale = getPenaltyScale(sec and sec:get('QuickCastChancePenalty'))
-    chance = math.max(0, math.min(100, math.floor((chance*chanceScale)+0.5)))
+    --TODO: pass isGodMode to getSpellCastChance opts?
+    local chance = I.MagExp_Player.Helpers.getSpellCastChance(spell.id, caster, { ignoreFatigue = not sec:get('UseFatigue') })
+    local chanceScale = getPenaltyScale(sec:get('QuickCastChancePenalty'))
+    chance = math.max(0, math.min(100, util.round(chance*chanceScale)))
     return chance
 end
 
@@ -191,16 +159,22 @@ local function handleCastCosts(spell)
     if debug.isGodMode() then return true end
     if spell.item then return true end
     local canAfford = true
-    if I.MagExp_Player and I.MagExp_Player.consumeSpellCost then
-        canAfford = I.MagExp_Player.consumeSpellCost(spell.id, nil)
+    local magickaCost = spell.cost or 0
+    if I.MagExp_Player then
+        if I.MagExp_Player.consumeSpellCost then
+            canAfford = I.MagExp_Player.consumeSpellCost(spell.id, nil)
+        end
+        if I.MagExp_Player.Helpers then
+            magickaCost = I.MagExp_Player.Helpers.getModifiedSpellCost(self, spell.id, false)
+        end
     end
     local sec = storage.playerSection('SettingsOSSC_General')
-    if canAfford and sec and sec:get('UseFatigue') then
+    if canAfford and sec:get('UseFatigue') then
         local fatigue   = types.Actor.stats.dynamic.fatigue(self)
         local fBase     = core.getGMST('fFatigueSpellBase') or 0
         local fMult     = core.getGMST('fFatigueSpellMult') or 0
         local fCostMult = core.getGMST('fFatigueSpellCostMult') or 1
-        local fatigueCost = (fBase + (fMult  *(spell.cost or 0)))*  fCostMult
+        local fatigueCost = (fBase + (fMult  * magickaCost))*  fCostMult
         if fatigueCost > 0 then
             fatigue.current = math.max(0, fatigue.current - fatigueCost)
         end
@@ -443,8 +417,11 @@ local function triggerQuickCast(opts)
                 end
             else
                 activeSpell = {
-                    id=activeSpellResult.id, effects=activeSpellResult.effects,
-                    cost=activeSpellResult.cost or 0, type=activeSpellResult.type
+                    id = activeSpellResult.id,
+                    effects = activeSpellResult.effects,
+                    cost = I.MagExp_Player and I.MagExp_Player.Helpers and I.MagExp_Player.Helpers.getModifiedSpellCost(self, activeSpellResult.id, false)
+                            or activeSpellResult.cost or 0,
+                    type = activeSpellResult.type
                 }
             end
         else
