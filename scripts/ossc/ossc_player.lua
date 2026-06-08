@@ -518,6 +518,7 @@ local function triggerQuickCast(opts)
     castStartTime = now
     enableCombatBlock()
     self:sendEvent('OSSC_CastingState', { isCasting = isCasting })
+    self:sendEvent('MagExp_SetPendingCastSpellId', { spellId = spellId })
 
     local safetyUnlockCastId = currentCastId
     async:newUnsavableSimulationTimer(scaledSafetyUnlockDelay, function()
