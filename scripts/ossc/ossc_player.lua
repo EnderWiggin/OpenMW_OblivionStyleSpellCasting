@@ -139,10 +139,10 @@ local function getCastChance(spell, caster)
     if spell.item then return 100 end
     local sec = storage.playerSection('SettingsOSSC_General')
     --TODO: pass isGodMode to getSpellCastChance opts?
-    local chance = I.MagExp_Player.Helpers.getSpellCastChance(spell.id, caster, { ignoreFatigue = not sec:get('UseFatigue') })
+    local chance, school = I.MagExp_Player.Helpers.getSpellCastChance(spell.id, caster, { ignoreFatigue = not sec:get('UseFatigue') })
     local chanceScale = getPenaltyScale(sec:get('QuickCastChancePenalty'))
     chance = math.max(0, math.min(100, util.round(chance*chanceScale)))
-    return chance
+    return chance, school
 end
 
 local function enableCombatBlock()
@@ -627,7 +627,7 @@ local function onUpdate(dt)
             table.remove(pendingLaunches, i)
             local spell = pl.spell
             if spell then
-                local chance = getCastChance(spell, self)
+                local chance, castSchool = getCastChance(spell, self)
                 if debug.isGodMode() then chance = 100 end
                 chance = math.max(0, math.min(100, chance))
                 local okCast = debug.isGodMode() or chance >= 100
@@ -835,12 +835,12 @@ local function onUpdate(dt)
                             end
                         end
                     else
-                        pcall(function() core.sound.playSound3d("spell failure illusion", self) end)
+                        pcall(function() core.sound.playSound3d("spell failure " .. (castSchool or 'illusion'), self) end)
                     end
                 else
                     handleCastCosts(spell)
                     ui.showMessage("You failed casting the spell.")
-                    pcall(function() core.sound.playSound3d("spell failure illusion", self) end)
+                    pcall(function() core.sound.playSound3d("spell failure " .. (castSchool or 'illusion'), self) end)
                 end
             end
             launchCleanup("launch resolved")
