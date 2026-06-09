@@ -334,14 +334,17 @@ local function triggerQuickCast(opts)
             debugLog("Input rejected — cast in progress (currentAnimGroup=" ..
                 tostring(currentAnimGroup) .. ")")
         end
+        self:sendEvent('OSSC_CastingState', { isCasting = false })
         return
     end
     if isParalyzedOrSilenced(self) then
         debugLog("Cast blocked — paralyzed or silenced")
+        self:sendEvent('OSSC_CastingState', { isCasting = false })
         return
     end
 
     local function abortCast(msg)
+        self:sendEvent('OSSC_CastingState', { isCasting = false })
         fullCleanup(msg or "aborted")
     end
 
