@@ -137,44 +137,12 @@ end
 
 local function getCastChance(spell, caster)
     if spell.item then return 100 end
-    local spellRec = core.magic.spells.records[spell.id]
-    if spellRec and spellRec.type == core.magic.SPELL_TYPE.Power then return 100 end
-    if not spell.effects or #spell.effects == 0 then return 100 end
-    local function getEffectMagnitude(effectId)
-        local magnitude = 0
-        pcall(function()
-            local activeEffects = types.Actor.activeEffects(caster)
-            if activeEffects then
-                local eff = activeEffects:getEffect(effectId)
-                if eff and eff.magnitude then magnitude = eff.magnitude end
-            end
-        end)
-        return magnitude
-    end
-    if getEffectMagnitude("silence") > 0 then return 0 end
-    local magicEffectRecord = core.magic.effects.records[spell.effects[1].id]
-    local schoolId = magicEffectRecord and magicEffectRecord.school
-    local skillVal = 0
-    if schoolId and types.NPC.stats.skills[schoolId] then
-        local sk = types.NPC.stats.skills[schoolId]
-        if sk then skillVal = sk(caster).modified end
-    end
-    local willpower = types.Actor.stats.attributes.willpower(caster).modified
-    local luck      = types.Actor.stats.attributes.luck(caster).modified
-    local cost      = spell.cost or 0
-    local soundLevel = getEffectMagnitude("sound")
-    local fatigue   = types.Actor.stats.dynamic.fatigue(caster)
-    local fatigueTerm = 1.0
     local sec = storage.playerSection('SettingsOSSC_General')
-    if sec and sec:get('UseFatigue') and fatigue.base > 0 then
-        fatigueTerm = 0.75 + 0.5*(fatigue.current/fatigue.base)
-    end
-    local baseChance = (skillVal*2)+(willpower/5)+(luck/10)-cost
-    local chance = (baseChance-soundLevel)*fatigueTerm
-    chance = math.max(0, math.min(100, math.floor(chance+0.5)))
-    local chanceScale = getPenaltyScale(sec and sec:get('QuickCastChancePenalty'))
-    chance = math.max(0, math.min(100, math.floor((chance*chanceScale)+0.5)))
-    return chance
+    --TODO: pass isGodMode to getSpellCastChance opts?
+    local chance, school = I.MagExp_Player.Helpers.getSpellCastChance(spell.id, caster, { ignoreFatigue = not sec:get('UseFatigue') })
+    local chanceScale = getPenaltyScale(sec:get('QuickCastChancePenalty'))
+    chance = math.max(0, math.min(100, util.round(chance*chanceScale)))
+    return chance, school
 end
 
 local function enableCombatBlock()
@@ -191,16 +159,22 @@ local function handleCastCosts(spell)
     if debug.isGodMode() then return true end
     if spell.item then return true end
     local canAfford = true
-    if I.MagExp_Player and I.MagExp_Player.consumeSpellCost then
-        canAfford = I.MagExp_Player.consumeSpellCost(spell.id, nil)
+    local magickaCost = spell.cost or 0
+    if I.MagExp_Player then
+        if I.MagExp_Player.consumeSpellCost then
+            canAfford = I.MagExp_Player.consumeSpellCost(spell.id, nil)
+        end
+        if I.MagExp_Player.Helpers then
+            magickaCost = I.MagExp_Player.Helpers.getModifiedSpellCost(self, spell.id, false)
+        end
     end
     local sec = storage.playerSection('SettingsOSSC_General')
-    if canAfford and sec and sec:get('UseFatigue') then
+    if canAfford and sec:get('UseFatigue') then
         local fatigue   = types.Actor.stats.dynamic.fatigue(self)
         local fBase     = core.getGMST('fFatigueSpellBase') or 0
         local fMult     = core.getGMST('fFatigueSpellMult') or 0
         local fCostMult = core.getGMST('fFatigueSpellCostMult') or 1
-        local fatigueCost = (fBase + (fMult  *(spell.cost or 0)))*  fCostMult
+        local fatigueCost = (fBase + (fMult  * magickaCost))*  fCostMult
         if fatigueCost > 0 then
             fatigue.current = math.max(0, fatigue.current - fatigueCost)
         end
@@ -283,6 +257,7 @@ local function animUnlock(reason)
     isCasting        = false
     currentAnimGroup = nil
     disableCombatBlock()
+    self:sendEvent('OSSC_CastingState', { isCasting = isCasting })
 end
 
 local function fullCleanup(reason)
@@ -350,22 +325,26 @@ end
 -- ── END NEW ────────────────────────────────────────────────────────────────
 
 -- ── Shared cast startup function ──────────────────────────────────────────
-local function triggerQuickCast()
+local function triggerQuickCast(opts)
+    local ignoreUIMode = opts and opts.ignoreUIMode
     local uiMode = (ui and ui.activeMode)
     if not uiMode and I.UI and I.UI.getMode then uiMode = I.UI.getMode() end
-    if uiMode ~= nil or core.isWorldPaused() or isCasting then
+    if (uiMode ~= nil and not ignoreUIMode) or core.isWorldPaused() or isCasting then
         if isCasting then
             debugLog("Input rejected — cast in progress (currentAnimGroup=" ..
                 tostring(currentAnimGroup) .. ")")
         end
+        self:sendEvent('OSSC_CastingState', { isCasting = false })
         return
     end
     if isParalyzedOrSilenced(self) then
         debugLog("Cast blocked — paralyzed or silenced")
+        self:sendEvent('OSSC_CastingState', { isCasting = false })
         return
     end
 
     local function abortCast(msg)
+        self:sendEvent('OSSC_CastingState', { isCasting = false })
         fullCleanup(msg or "aborted")
     end
 
@@ -375,9 +354,13 @@ local function triggerQuickCast()
 
     -- ── Resolve spell / enchanted item ────────────────────────────────────
     local activeSpell = nil
-    local selectedItem = nil
-    pcall(function() selectedItem = types.Actor.getSelectedEnchantedItem(self) end)
-    if selectedItem and selectedItem:isValid() then
+    local selectedItem = opts and opts.item
+    local activeSpellResult = opts and opts.spell
+
+    if not selectedItem or not selectedItem:isValid() then
+        pcall(function() selectedItem = types.Actor.getSelectedEnchantedItem(self) end)
+    end
+    if selectedItem and selectedItem:isValid() and not activeSpellResult then
         local rec = nil
         pcall(function()
             if selectedItem.type == types.Weapon   then rec = types.Weapon.record(selectedItem)
@@ -398,9 +381,10 @@ local function triggerQuickCast()
         end
     end
 
-    local activeSpellResult = nil
     if not activeSpell then
-        pcall(function() activeSpellResult = core.magic.getSelectedSpell() end)
+        if not activeSpellResult then
+            pcall(function() activeSpellResult = core.magic.getSelectedSpell() end)
+        end
         if not activeSpellResult then
             pcall(function() activeSpellResult = types.Actor.getSelectedSpell(self) end)
         end
@@ -436,8 +420,11 @@ local function triggerQuickCast()
                 end
             else
                 activeSpell = {
-                    id=activeSpellResult.id, effects=activeSpellResult.effects,
-                    cost=activeSpellResult.cost or 0, type=activeSpellResult.type
+                    id = activeSpellResult.id,
+                    effects = activeSpellResult.effects,
+                    cost = I.MagExp_Player and I.MagExp_Player.Helpers and I.MagExp_Player.Helpers.getModifiedSpellCost(self, activeSpellResult.id, false)
+                            or activeSpellResult.cost or 0,
+                    type = activeSpellResult.type
                 }
             end
         else
@@ -533,6 +520,8 @@ local function triggerQuickCast()
     currentCastId = currentCastId + 1
     castStartTime = now
     enableCombatBlock()
+    self:sendEvent('OSSC_CastingState', { isCasting = isCasting })
+    self:sendEvent('MagExp_SetPendingCastSpellId', { spellId = spellId })
 
     local safetyUnlockCastId = currentCastId
     async:newUnsavableSimulationTimer(scaledSafetyUnlockDelay, function()
@@ -641,7 +630,7 @@ local function onUpdate(dt)
             table.remove(pendingLaunches, i)
             local spell = pl.spell
             if spell then
-                local chance = getCastChance(spell, self)
+                local chance, castSchool = getCastChance(spell, self)
                 if debug.isGodMode() then chance = 100 end
                 chance = math.max(0, math.min(100, chance))
                 local okCast = debug.isGodMode() or chance >= 100
@@ -849,12 +838,12 @@ local function onUpdate(dt)
                             end
                         end
                     else
-                        pcall(function() core.sound.playSound3d("spell failure illusion", self) end)
+                        pcall(function() core.sound.playSound3d("spell failure " .. (castSchool or 'illusion'), self) end)
                     end
                 else
                     handleCastCosts(spell)
                     ui.showMessage("You failed casting the spell.")
-                    pcall(function() core.sound.playSound3d("spell failure illusion", self) end)
+                    pcall(function() core.sound.playSound3d("spell failure " .. (castSchool or 'illusion'), self) end)
                 end
             end
             launchCleanup("launch resolved")
@@ -1002,9 +991,48 @@ local function onLoad(data)
     if data and data.powerCooldowns then OSSC_PowerCooldowns = data.powerCooldowns end
 end
 
+--- item and spell in these opts are ids, because we can't serialize full game objects to pass to events
+local function OSSC_QuickCast_Handler(opts)
+    if not opts then
+        triggerQuickCast()
+        return
+    end
+
+    --get item by id
+    if opts.item then
+        local _, item = pcall(function()
+            local id = opts.item
+            if not id then return nil end
+
+            local items = self.type.inventory(self):getAll()
+            for _, item in ipairs(items) do
+                if item.id == id then return item end
+            end
+            return nil
+        end)
+        if item and item:isValid() then
+            opts.item = item
+        end
+        --get spell by id
+    elseif opts.spell then
+        local _, spell = pcall(function() return core.magic.spells.records[opts.spell] end)
+        if spell then
+            opts.spell = spell
+        end
+    end
+
+    triggerQuickCast(opts)
+end
+
 return {
     engineHandlers = { onUpdate=onUpdate, onSave=onSave, onLoad=onLoad },
+    interfaceName = 'OSSC',
+    interface = {
+        triggerQuickCast = triggerQuickCast,
+        isCasting = function() return isCasting end
+    },
     eventHandlers  = {
+        OSSC_QuickCast = OSSC_QuickCast_Handler,
         AddVfx      = function(data) pcall(function() anim.addVfx(self, data.model, data.options) end) end,
         RemoveVfx   = function(vId)  pcall(function() anim.removeVfx(self, vId) end) end,
         PlaySound3d = function(data) pcall(function() core.sound.playSound3d(data.sound, self) end) end,
