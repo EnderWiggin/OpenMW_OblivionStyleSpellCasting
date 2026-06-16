@@ -166,6 +166,34 @@ if I.Settings and I.Settings.registerPage then
                             items    = penaltySelectItems,
                         },
                     },
+                    {
+                        key         = 'AllowPowerCasting',
+                        name        = 'Allow Quick-Casting Powers (separate cooldown) For Gamepads',
+                        description = 'Let OSSC quick-cast Powers. The mod tracks its own 24-hour in-game cooldown. This solution does not trigger the vanilla Power Cooldown so it is only advised to use with gamepad. Access to power cooldown for modders will be introduced in OpenMW 0.52.',
+                        renderer    = 'checkbox',
+                        default     = true,
+                    },
+                    {
+                        key         = 'ExperienceFormula',
+                        name        = 'Experience Formula',
+                        description = 'ossc = flat ratio (vanilla-style, controlled by Skill Experience Ratio above).\nmbsp = magicka-based: costlier spells grant proportionally more XP, matching the Magicka-Based Skill Progression formula.',
+                        default     = 'ossc',
+                        renderer    = 'select',
+                        argument    = {
+                            disabled = false,
+                            l10n     = 'OSSC',
+                            items    = { 'ossc', 'mbsp' },
+                        },
+                    },
+                    {
+                        key         = 'MagickaXPMult',
+                        name        = 'Magicka XP Multiplier (mbsp formula only)',
+                        description = 'Only used when Experience Formula is set to "mbsp".\nScales how much each point of spell cost contributes to XP. Default 0.1 matches MBSP\'s default.',
+                        renderer    = 'number',
+                        default     = 0.1,
+                        min         = 0,
+                        max         = 1,
+                    },
                 }
             })
         end)

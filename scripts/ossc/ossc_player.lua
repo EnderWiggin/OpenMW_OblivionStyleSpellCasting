@@ -145,6 +145,51 @@ local function getCastChance(spell, caster)
     return chance, school
 end
 
+-- ── Magicka-based XP cost calc (ported from MBSP GameSpell formula) ──────────
+local fEffectCostMult = core.getGMST("fEffectCostMult") or 1.0
+local spellCostCache  = {}
+local function calcSpellCost(spell)
+    if not spell or not spell.id then return 0 end
+    if spellCostCache[spell.id] then return spellCostCache[spell.id] end
+    local effects = spell.effects
+    if not effects or #effects == 0 then
+        local cost = spell.cost or 0
+        spellCostCache[spell.id] = cost
+        return cost
+    end
+    local total = 0
+    local isAutocalc = false
+    local spellRec = core.magic.spells.records[spell.id]
+    if spellRec then isAutocalc = spellRec.autocalcFlag or false end
+    for _, eff in ipairs(effects) do
+        local mgef = core.magic.effects.records[eff.id]
+        if mgef then
+            local hasMag = mgef.hasMagnitude
+            local hasDur = mgef.hasDuration
+            local appliedOnce = mgef.isAppliedOnce
+            local minMag = math.max(1, hasMag and (eff.magnitudeMin or 1) or 1)
+            local maxMag = math.max(1, hasMag and (eff.magnitudeMax or minMag) or 1)
+            local dur    = hasDur and (eff.duration or 1) or 1
+            if not appliedOnce then dur = math.max(1, dur) end
+            local x = 0.5 * (minMag + maxMag)
+            x = x * (0.1 * (mgef.baseCost or 1))
+            x = x * dur
+            x = x + (0.05 * (eff.area or 0) * (mgef.baseCost or 1))
+            x = x * fEffectCostMult
+            if eff.range == core.magic.RANGE.Target then x = x * 1.5 end
+            total = total + math.max(0, x)
+        end
+    end
+    local cost
+    if isAutocalc then
+        cost = math.floor(total + 0.5)
+    else
+        cost = math.floor((spell.cost or total) + 0.5)
+    end
+    spellCostCache[spell.id] = cost
+    return cost
+end
+
 local function enableCombatBlock()
     if not I.Controls or not I.Controls.overrideCombatControls then return end
     I.Controls.overrideCombatControls(true)
@@ -438,8 +483,16 @@ local function triggerQuickCast(opts)
     if not spellRec and activeSpell.enchantment then spellRec = activeSpell.enchantment end
     if not spellRec then return abortCast("no spell record") end
     if spellRec.type == core.magic.SPELL_TYPE.Power then
-        ui.showMessage("You need bigger focus to cast powers. Use spell stance.")
-        return abortCast("power blocked")
+        local sec = storage.playerSection('SettingsOSSC_General')
+        if not (sec and sec:get('AllowPowerCasting')) then
+            ui.showMessage("You need bigger focus to cast powers. Use spell stance.")
+            return abortCast("power blocked")
+        end
+        local readyTime = OSSC_PowerCooldowns[spellId]
+        if readyTime and core.getGameTime() < readyTime then
+            ui.showMessage(core.getGMST('sPowerAlreadyUsed') or "You can only use this power once per day.")
+            return abortCast("power on cooldown")
+        end
     end
 
     currentSpell = activeSpell
@@ -647,20 +700,45 @@ local function onUpdate(dt)
                             cosPitch*math.sin(yaw),
                             cosPitch*math.cos(yaw),
                             math.sin(pitch))
-                        local flatForward = util.vector3(cameraDir.x, cameraDir.y, 0):normalize()
-                        local leftDir     = util.vector3(-flatForward.y, flatForward.x, 0)
-                        local startPos
-                        if camera.getMode() == camera.MODE.FirstPerson then
-                            startPos = camera.getPosition()
-                                + flatForward * 40
-                                - util.vector3(0,0,8)
-                                + leftDir * 35
-                        else
-                            startPos = self.position
-                                + flatForward * 40
-                                + util.vector3(0,0,115)
-                                + leftDir * 25
-                        end
+                    local flatForward = util.vector3(cameraDir.x, cameraDir.y, 0):normalize()
+                    local leftDir     = util.vector3(-flatForward.y, flatForward.x, 0)
+                    local rightDir    = -leftDir
+                    local startPos
+                        if hasEternalGrimoire() then
+                        -- ── Grimoire spawn offsets (right-hand cast) ──────────
+                        -- Positive = further right / further forward / higher
+                        local grimSide_1st    =  30   -- lateral (right)
+                        local grimForward_1st =  40   -- forward
+                        local grimUp_1st      = -16    -- vertical
+                        local grimSide_3rd    =  20   -- lateral (right)
+                        local grimForward_3rd =  40   -- forward
+                        local grimUp_3rd      = 115   -- vertical
+
+                    if camera.getMode() == camera.MODE.FirstPerson then
+                    startPos = camera.getPosition()
+                    + flatForward * grimForward_1st
+                    + util.vector3(0, 0, grimUp_1st)
+                    + rightDir * grimSide_1st
+                    else
+                    startPos = self.position
+                    + flatForward * grimForward_3rd
+                    + util.vector3(0, 0, grimUp_3rd)
+                    + rightDir * grimSide_3rd
+                end
+            else
+            -- ── Normal spawn offsets (left-hand cast) ─────────────
+            if camera.getMode() == camera.MODE.FirstPerson then
+            startPos = camera.getPosition()
+            + flatForward * 40
+            - util.vector3(0, 0, 8)
+            + leftDir * 35
+            else
+            startPos = self.position
+            + flatForward * 40
+            + util.vector3(0, 0, 115)
+            + leftDir * 25
+            end
+            end
                         local cameraPos = camera.getPosition()
                         local endPos    = cameraPos + cameraDir * 10000
                         local ray = nearby.castRay(cameraPos, endPos, { ignore = self })
@@ -780,7 +858,14 @@ local function onUpdate(dt)
                         local function awardSkillXP(skillId)
                             local skill = types.NPC.stats.skills[skillId](self)
                             if not skill or skill.base >= 100 then return end
-                            local prog = skill.progress + (xpGain*0.01)
+                            local gain = xpGain * 0.01
+                            local formula = generalSection:get('ExperienceFormula')
+                            if formula == 'mbsp' then
+                                local mult = generalSection:get('MagickaXPMult') or 0.1
+                                local cost = calcSpellCost(spell)
+                                gain = gain / 2 + gain * cost * mult
+                            end
+                            local prog = skill.progress + gain
                             local base = skill.base
                             while prog >= 1.00 and base < 100 do
                                 base = base+1; prog = prog-1.00
@@ -835,6 +920,11 @@ local function onUpdate(dt)
                             else
                                 local school = resolveMagicSchool()
                                 if school and MAGIC_SKILLS[school] then awardSkillXP(school) end
+                            end
+                             local pwrRec = core.magic.spells.records[spell.id]
+                            if pwrRec and pwrRec.type == core.magic.SPELL_TYPE.Power then
+                                OSSC_PowerCooldowns[spell.id] = core.getGameTime() + 24 * 3600
+                                debugLog("Power cooldown set for " .. tostring(spell.id))
                             end
                         end
                     else
